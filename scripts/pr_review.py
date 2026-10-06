@@ -34,7 +34,8 @@ import subprocess
 import urllib.request
 
 OWNER, REPO = os.environ.get("GITHUB_REPOSITORY", "tayyabimam1/awesome-ai-agent-stack").split("/", 1)
-DEFAULT_FREELLMAPI_URL = "https://gateway.example.com"
+# FreeLLMAPI gateway base URL comes from the FREELLMAPI_URL env var
+# (repo variable) — never hardcoded, never committed to the repo.
 META_URL = "https://api.meta.ai/v1"
 MARKER_TEXT = "Automated review, posted by the repo owner's assistant"
 MAX_DIFF = 40000
@@ -58,11 +59,17 @@ def main() -> None:
         missing = "META_API_KEY secret"
     elif backend == "freellmapi":
         key = os.environ.get("FREELLMAPI_KEY", "").strip()
-        base_url = (os.environ.get("FREELLMAPI_URL", "").strip()
-                    or DEFAULT_FREELLMAPI_URL).rstrip("/")
+        base_url = os.environ.get("FREELLMAPI_URL", "").strip().rstrip("/")
         model = os.environ.get("REVIEW_MODEL", "").strip()
+        if not model and key and base_url:
+            model = discover_model(base_url, key)
+            if model:
+                print(f"REVIEW_MODEL not set — auto-selected {model} from the gateway.")
         max_tokens = 1500
-        missing = "FREELLMAPI_KEY secret or REVIEW_MODEL variable"
+        if not base_url:
+            print("FREELLMAPI_URL repo variable not set — skipping AI review.")
+            return
+        missing = "FREELLMAPI_KEY secret"
     else:  # github — GitHub Models, free, no secrets; GITHUB_TOKEN is enough
         key = os.environ.get("GH_TOKEN", "").strip()
         base_url = "https://models.github.ai/inference"
@@ -156,6 +163,32 @@ def main() -> None:
         budget_consume(budget, repo_flag)
     else:
         print(f"Failed to post comment: {out.stderr.strip()}")
+
+
+def discover_model(base_url: str, key: str) -> str:
+    """Pick a model from the gateway when REVIEW_MODEL isn't set.
+
+    Prefers small/fast model names; falls back to the first listed model.
+    """
+    try:
+        req = urllib.request.Request(
+            base_url + "/models", headers={"Authorization": f"Bearer {key}"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.load(resp)
+        ids = [m.get("id") for m in data.get("data", []) if m.get("id")]
+        # skip non-chat models (image/audio/video/embeddings/tts)
+        chat_ids = [i for i in ids
+                    if not any(s in i.lower() for s in
+                               ("image", "audio", "video", "embed", "tts",
+                                "whisper", "dall-e", "imagen"))]
+        pool = chat_ids or ids
+        for hint in ("mini", "flash", "haiku", "3-5", "4o-mini", "turbo"):
+            for i in pool:
+                if hint in i.lower():
+                    return i
+        return pool[0] if pool else ""
+    except Exception:
+        return ""
 
 
 def budget_check(repo_flag) -> dict | None:
